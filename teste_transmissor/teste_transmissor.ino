@@ -1,0 +1,208 @@
+
+/*************************** Marlon Nardi ******************************
+  Projeto: Programação do Controle Handler V1.0
+  Vídeo ensinando a montar: https://www.marlonnardi.com/p/construa-seu-proprio-robo-esteira_23.html
+  Loja: https://www.lojamarlonnardi.com/
+  Site: https://www.marlonnardi.com/
+  Youtube: https://www.youtube.com/marlonnardiw
+  Facebook: https://www.facebook.com/professormarlonnardi
+************************************************************************/
+
+/******************* Programação do Controle Handler V1.0 ***************/
+
+//======================= Incluindo bilbiotecas ==============================//
+#include <SPI.h>
+#include <RF24.h>
+#include <Wire.h>
+#include <QMC5883LCompass.h>
+#include <Servo.h>
+
+#define leme_pin 10
+//========================= Criando objetos =================================//
+RF24 Radio(2, 3); // CE, CSN // Instancia/cria o objeto Radio para que possamos trabalhar com ele. Também temos que informar os pinos do Arduino conectados ao CE e ao CSN do NRF24L01.
+QMC5883LCompass bussola;
+Servo leme;
+
+//==================== Nomeando as constantes ==============================//
+//MONSTER MOTOR SHIELD
+#define BRAKEVCC 0
+#define CW  1
+#define CCW 2
+#define BRAKEGND 3
+
+#define MOTOR_A 0
+#define MOTOR_B 1
+const uint8_t PWM_MAX = 255;
+const uint8_t PWM_HALF = PWM_MAX / 2;
+const int currentSensingThreshhold = 100;
+const int inAPin[2] = {7, 4};
+const int inBPin[2] = {8, 9};
+const int pwmPin[2] = {5, 6};
+const int enPin[2] = {0, 1};
+const int csPin[2] = {2, 3};
+const int statPin = 13;
+
+//=================== Criando uma estrutura/pacote de dados para a transmissão e recepção de informação através de dois Pipes =======================//
+struct EstruturaDadosTXRX
+{
+  float ang = 0.0;
+  float precisao = 0.0;
+  char confirm = 'O';
+  int srv_ang = 70;
+  int analog_x = 0;
+  int analog_y = 0;
+};
+
+typedef struct EstruturaDadosTXRX TipoDosDadosTXRX;
+TipoDosDadosTXRX DadosTransmitidos;
+TipoDosDadosTXRX DadosRecebidos;
+
+//=================== Declaração de variáveis globáis =======================//
+int i, leme_ang; //Variável para contagem
+float graus; //Variável para armazenar o valor aferido
+float precisao;
+int x = 0, y = 0, z = 0;
+
+//=================== Declaração da variável global somente de leitura para armazenas os endereço de leitura e escrita =======================//
+                    //Endereço: 0         1
+const byte Enderecos[][6] = {"00001", "00002"}; //Criamos um vetor constante do tipo Byte que terá duas posições, pois precisamos de um endereço para escrever e outro para ler. Apesar do
+//endereço ter somete 5 números, declaramos 6 para que o comppilador adicione o caracter null \0 automaticamente.
+
+//====================================== METODOS MOTOR MONSTER SHIELD ==============================================//
+void motorSetup()
+{
+  //pinMode(statPin, OUTPUT);
+
+  // Initialize digital pins as outputs
+  for (int i = 0; i < 2; i++)
+  {
+    pinMode(inAPin[i], OUTPUT);
+    pinMode(inBPin[i], OUTPUT);
+    pinMode(pwmPin[i], OUTPUT);
+  }
+  // Initialize with brake applied
+  for (int i = 0; i < 2; i++)
+  {
+    digitalWrite(inAPin[i], LOW);
+    digitalWrite(inBPin[i], LOW);
+  }
+}
+
+void motorOff(uint8_t motor)
+{
+  // Initialize brake to Vcc
+  for (int i = 0; i < 2; i++)
+  {
+    digitalWrite(inAPin[i], LOW);
+    digitalWrite(inBPin[i], LOW);
+  }
+  analogWrite(pwmPin[motor], 0);
+}
+void motorGo(uint8_t motor, uint8_t mode, uint8_t speed)
+{
+
+  if (motor == MOTOR_A || motor == MOTOR_B)
+  {
+    switch (mode)
+    {
+    case BRAKEVCC: // Brake to VCC
+      digitalWrite(inAPin[motor], HIGH);
+      digitalWrite(inBPin[motor], HIGH);
+      break;
+    case CW: // Turn Clockwise
+      digitalWrite(inAPin[motor], HIGH);
+      digitalWrite(inBPin[motor], LOW);
+      break;
+    case CCW: // Turn Counter-Clockwise
+      digitalWrite(inAPin[motor], LOW);
+      digitalWrite(inBPin[motor], HIGH);
+      break;
+    case BRAKEGND: // Brake to GND
+      digitalWrite(inAPin[motor], LOW);
+      digitalWrite(inBPin[motor], LOW);
+      break;
+
+    default:
+      // Invalid mode does not change the PWM signal
+      return;
+    }
+    analogWrite(pwmPin[motor], speed);
+  }
+  return;
+}
+
+void setup() {
+  //==================== Declaração de entradas e saídas ========================//
+
+  //================== Configurações iniciais do NRF24L01 ======================//
+  Radio.begin();// Inicia o transceptor NRF24L01
+  Wire.begin();
+  leme.attach(leme_pin);
+  leme.write(70);
+  Serial.begin(9600);
+  Radio.openWritingPipe(Enderecos[1]); // Informamos para o transceptor qual é o endereço de escrita Enderecos[1] ou 00002 e abrimos o Pipe/Tubo.
+  Radio.openReadingPipe(1, Enderecos[0]); // Informamos para o transceptor qual é o endereço de leitura Enderecos[0] ou 00001 e abrimos o Pipe/Tubo. Esse primeiro parâmentro, o número 1,
+  //define o número do Pipe. Podemos utilizar 6 Pipes, de 0 à 5.
+  Radio.setPALevel(RF24_PA_MAX);// Muda o PA para potência máxima de transmissão. Para potência minima: RF24_PA_MIN Para potência média: RF24_PA_HIGH Para potência máxima (recomendado para o módulo com etapa amplificadora e antena): RF24_PA_MAX
+  Radio.setDataRate(RF24_250KBPS); // Mudamos a taxa de trasnferência de dados para 250 Kbps, isso melhora a distância na transmissão.
+}
+
+
+void loop() {
+  delay(5);// Tempo para não haver perca de dados
+  //========================= Trasmitindo os dados ===========================//
+  DadosTransmitidos.ang = graus;
+  DadosTransmitidos.precisao = precisao;
+  DadosTransmitidos.confirm = 'o';
+  DadosTransmitidos.srv_ang = leme_ang;
+
+  Radio.stopListening(); // Comando para o rádio parar de ouvir, dessa forma ele fala ou transmite.
+  Radio.write(&DadosTransmitidos, sizeof(TipoDosDadosTXRX));// Transmite/escreve os dados para o outro rádio. DadosTransmitidos = Informação que queremos enviar. TipoDosDadosTXRX: Tamanho dessa variável.
+
+
+  //========================= Recebendo os dados ===========================//
+  delay(5);// Tempo para não haver perca de dados.
+
+  Radio.startListening(); // Comando para o rádio começar ouvir, dessa forma ele escuta ou recebe.
+    
+  while (!Radio.available()); //Fica em looping até receber a informação. 
+  Radio.read(&DadosRecebidos, sizeof(TipoDosDadosTXRX)); // Lê a informação transmitida pelo Robô.
+
+  if (DadosRecebidos.confirm == 'k') {// Se DadosRecebidos.SensorRadiacaoGama que foi transmitido pelo robô for igual a HIGH.
+    Serial.println("OK, dados recebidos");
+  }
+  else {// Se não
+    Serial.println("Falha");
+  }
+  if (DadosRecebidos.analog_x < 500){ //ré
+      Serial.println("Ré");
+      int aux_vel = map(DadosRecebidos.analog_x, 500, 0, 0, 255);
+      Serial.print("aux velocidade: ");
+      Serial.println(aux_vel);
+      motorGo(MOTOR_A, CCW, aux_vel);
+      motorGo(MOTOR_B, CCW, aux_vel);
+      delay(50);
+  }
+  else if (DadosRecebidos.analog_x > 510){
+      Serial.println("Frente");
+      int aux_vel = map(DadosRecebidos.analog_x, 510, 1023, 0, 255);
+      Serial.print("aux velocidade: ");
+      Serial.println(aux_vel);
+      motorGo(MOTOR_A, CW, aux_vel);
+      motorGo(MOTOR_B, CW, aux_vel);
+      delay(50);
+  }
+  else{
+      Serial.println("Parado");
+      motorOff(MOTOR_A);
+      motorOff(MOTOR_B);
+      delay(50);
+  }
+  
+  //leme.write(DadosRecebidos.analog_y);
+  leme_ang = DadosRecebidos.srv_ang;
+  leme.write(leme_ang);
+  Serial.print("Leme lido: ");
+  Serial.println(leme_ang);
+  delay(50);
+}
